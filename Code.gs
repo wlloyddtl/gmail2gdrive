@@ -14,6 +14,7 @@ function getOrCreateLabel(labelName) {
 
 /**
  * Recursive function to create and return a complete folder path.
+ * Base folder can also be a teamdrive..
  */
 function getOrCreateSubFolder(baseFolder,folderArray) {
   if (folderArray.length == 0) {
@@ -39,14 +40,21 @@ function getOrCreateSubFolder(baseFolder,folderArray) {
 /**
  * Returns the GDrive folder with the given path.
  */
-function getFolderByPath(path) {
+function getFolderByPath(rule, path) {
   var parts = path.split("/");
+  Logger.log("INFO: getFolderByPath " + parts);
 
   if (parts[0] == '') parts.shift(); // Did path start at root, '/'?
 
-  var folder = DriveApp.getRootFolder();
+  if (rule.tdrive_id) {
+    var folder = DriveApp.getFolderById(rule.tdrive_id);
+  } else {
+    var folder = DriveApp.getRootFolder();
+  }
+
   for (var i = 0; i < parts.length; i++) {
     var result = folder.getFoldersByName(parts[i]);
+    Logger.log("INFO:       Process Folder: "+ folder + " (" + parts[i]+ ")");
     if (result.hasNext()) {
       folder = result.next();
     } else {
@@ -59,13 +67,17 @@ function getFolderByPath(path) {
 /**
  * Returns the GDrive folder with the given name or creates it if not existing.
  */
-function getOrCreateFolder(folderName) {
+function getOrCreateFolder(rule, folderName) {
   var folder;
   try {
-    folder = getFolderByPath(folderName);
+    folder = getFolderByPath(rule, folderName);
   } catch(e) {
     var folderArray = folderName.split("/");
-    folder = getOrCreateSubFolder(DriveApp.getRootFolder(), folderArray);
+    if (rule.tdrive_id) {
+      folder = getOrCreateSubFolder(DriveApp.getFolderById(rule.tdrive_id), folderArray);
+    } else {
+      folder = getOrCreateSubFolder(DriveApp.getRootFolder(), folderArray);
+    }
   }
   return folder;
 }
@@ -90,7 +102,7 @@ function processMessage(message, rule, config) {
       continue;
     }
     try {
-      var folder = getOrCreateFolder(Utilities.formatDate(messageDate, config.timezone, rule.folder));
+      var folder = getOrCreateFolder(rule, Utilities.formatDate(messageDate, config.timezone, rule.folder));
       var file = folder.createFile(attachment);
       var filename = file.getName();
       if (rule.filenameFrom && rule.filenameTo && rule.filenameFrom == file.getName()) {
@@ -136,7 +148,7 @@ function processThreadToHtml(thread) {
  */
 function processThreadToPdf(thread, rule) {
   Logger.log("INFO: Saving PDF copy of thread '" + thread.getFirstMessageSubject() + "'");
-  var folder = getOrCreateFolder(rule.folder);
+  var folder = getOrCreateFolder( false, rule.folder);
   var html = processThreadToHtml(thread);
   var blob = Utilities.newBlob(html, 'text/html');
   var pdf = folder.createFile(blob.getAs('application/pdf')).setName(thread.getFirstMessageSubject() + ".pdf");
@@ -148,12 +160,14 @@ function processThreadToPdf(thread, rule) {
  * Use this as trigger function for periodic execution.
  */
 function Gmail2GDrive() {
+  Logger.log("INFO: Gmail2Grive 0.15");
+
   if (!GmailApp) return; // Skip script execution if GMail is currently not available (yes this happens from time to time and triggers spam emails!)
   var config = getGmail2GDriveConfig();
   var label = getOrCreateLabel(config.processedLabel);
   var end, start, runTime;
   start = new Date(); // Start timer
-
+  
   Logger.log("INFO: Starting mail attachment processing.");
   if (config.globalFilter===undefined) {
     config.globalFilter = "has:attachment -in:trash -in:drafts -in:spam";
@@ -162,21 +176,48 @@ function Gmail2GDrive() {
   // Iterate over all rules:
   for (var ruleIdx=0; ruleIdx<config.rules.length; ruleIdx++) {
     var rule = config.rules[ruleIdx];
-    var gSearchExp  = config.globalFilter + " " + rule.filter + " -label:" + config.processedLabel;
+    var gSearchExp  = config.globalFilter + " " + rule.filter + 
+      " -label:" + config.processedLabel;
     if (config.newerThan != "") {
       gSearchExp += " newer_than:" + config.newerThan;
     }
+
     var doArchive = rule.archive == true;
     var doPDF = rule.saveThreadPDF == true;
+    // var tdrive = rule.tdrive == false;
+    //Logger.log("INFO: Team Drives Active " + rule.tdrive);
 
+    if (rule.tdrive) { 
+      var tdrive = false;
+      Logger.log("INFO: Team Drives Active " );
+      ghad = getGoogleTeamDrives();
+      rule.tdrive_id = ghad[rule.tdrive]
+      Logger.log("INFO:       tdrive2 [" +tdrive + "]: "+ghad[rule.tdrive] );
+    }
+    
     // Process all threads matching the search expression:
     var threads = GmailApp.search(gSearchExp);
-    Logger.log("INFO:   Processing rule: "+gSearchExp);
+    Logger.log("INFO:   Processing rule1: "+gSearchExp);
+    Logger.log("INFO:   Processing rule2: "+threads.length);
+
     for (var threadIdx=0; threadIdx<threads.length; threadIdx++) {
       var thread = threads[threadIdx];
       end = new Date();
       runTime = (end.getTime() - start.getTime())/1000;
-      Logger.log("INFO:     Processing thread: "+thread.getFirstMessageSubject() + " (runtime: " + runTime + "s/" + config.maxRuntime + "s)");
+      var subject = thread.getFirstMessageSubject();
+      
+      var regExp = new RegExp("([eE]1[0-9][0-9][0-9][0-9])", "gi"); // "i" is for case insensitive
+      var enq_number = regExp.exec(subject)[0];
+
+      if (enq_number[0] == "e") {
+        Logger.log("INFO:     Detect Enq number lower case : "+enq_number[0]);
+        enq_number = enq_number.replace("e","E");
+      }
+      
+      Logger.log("INFO:     Detect Enq number : "+enq_number);
+
+      Logger.log("INFO:     Processing thread1: "+thread.getFirstMessageSubject());
+      Logger.log("INFO:     Processing thread2: (runtime: " + runTime + "s/" + config.maxRuntime + "s)");
       if (runTime >= config.maxRuntime) {
         Logger.log("WARNING: Self terminating script after " + runTime + "s");
         return;
@@ -193,7 +234,7 @@ function Gmail2GDrive() {
       }
 
       // Mark a thread as processed:
-      thread.addLabel(label);
+      // thread.addLabel(label);
 
       if (doArchive) { // Archive a thread if required
         Logger.log("INFO:     Archiving thread '" + thread.getFirstMessageSubject() + "' ...");
